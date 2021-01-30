@@ -21,6 +21,7 @@ import torch
 from asteroid.losses.sdr import SingleSrcNegSDR as LossSDR
 from pytorch_lightning import seed_everything
 from ray import tune
+from ray.tune import CLIReporter
 from ray.tune.schedulers import ASHAScheduler
 from torch import Tensor
 
@@ -40,7 +41,7 @@ ROOT = os.path.dirname(os.path.realpath(__file__))
 
 def train_model_contrastive(
   config: dict,
-  use_ray: bool = True,
+  ray_report: bool = True,
 ):
   """
   Parameters
@@ -73,7 +74,7 @@ def train_model_contrastive(
 
 def train_model_unimodal(
   config: dict,
-  use_ray: bool = True,
+  ray_report: bool = True,
 ):
   """
   Parameters
@@ -155,14 +156,16 @@ def train_model_unimodal(
       D.SpeakerSpecificMixtures(
         config['speaker_id'],
         speech_subset='pretrain',
-        premixture_snr=config['premixture_snr'],
-        noise_subset='free-sound'), config['batch_size'])
+        noise_subset='free-sound',
+        premixture_snr=config['premixture_snr']
+      ), config['batch_size'])
     (vl_x, vl_s, vl_n) = next(iter(torch.utils.data.DataLoader(
       D.SpeakerSpecificMixtures(
         config['speaker_id'],
         speech_subset='prevalidation',
-        premixture_snr=config['premixture_snr'],
-        noise_subset='free-sound'), 100)))
+        noise_subset='free-sound',
+        premixture_snr=config['premixture_snr']
+      ), 100)))
     vl_x = vl_x.to(device)
     vl_s = vl_s.to(device)
   else:
@@ -217,20 +220,20 @@ def train_model_unimodal(
       vl_loss = float(loss_sdsdr(vl_rs[..., :min_len],
                      vl_s[..., :min_len]).mean())
 
+    if ray_report:
+      # send intermediate results back to Ray
+      tune.report(num_batches=num_batches, vl_loss=vl_loss)
+
     if vl_loss < best_loss:
       best_epoch = current_epoch
       best_loss = vl_loss
       best_state_dict = model.state_dict()
-
-    if use_ray:
-      # send intermediate results back to Ray
-      tune.report(num_batches=num_batches, vl_loss=vl_loss)
       with tune.checkpoint_dir(best_epoch) as checkpoint_dir:
         path = os.path.join(checkpoint_dir, 'checkpoint')
         torch.save(best_state_dict, path)
 
     # check for convergence
-    if (current_epoch - best_epoch > 1000):
+    if (current_epoch - best_epoch > 200):
       break
 
   #
@@ -263,7 +266,7 @@ def train_model_unimodal(
 
 def finetune_model(
   config: dict,
-  use_ray: bool = True,
+  ray_report: bool = True,
 ):
   """
   Parameters
@@ -439,20 +442,20 @@ def finetune_model(
       sisdr_out = loss_sisdr(vl_rs[..., :min_len], vl_s[..., :min_len])
       vl_result.append(float((sisdr_in - sisdr_out).mean()))
 
+    if ray_report:
+      # send intermediate results back to Ray
+      tune.report(num_batches=num_batches, vl_loss=vl_loss)
+
     if vl_loss < best_loss:
       best_epoch = current_epoch
       best_loss = vl_loss
       best_state_dict = model.state_dict()
-
-    if use_ray:
-      # send intermediate results back to Ray
-      tune.report(num_batches=num_batches, vl_loss=vl_loss)
       with tune.checkpoint_dir(best_epoch) as checkpoint_dir:
         path = os.path.join(checkpoint_dir, 'checkpoint')
         torch.save(best_state_dict, path)
 
     # check for convergence
-    if (current_epoch - best_epoch > 1000):
+    if (current_epoch - best_epoch > 200):
       break
 
   #
@@ -602,6 +605,14 @@ def pretrain_per_speaker_id(
   }
   print(config)
 
+  reporter = CLIReporter(
+    parameter_columns=[
+      'model_name', 'pretrain_name', 'premixture_snr', 'speaker_id'
+    ], metric_columns=[
+      'num_batches', 'vl_loss',
+    ], max_report_frequency=10,
+  )
+
   # use Tune to queue up trials in parallel on the GPUs
   tune.run(
     trial_func,
@@ -609,6 +620,7 @@ def pretrain_per_speaker_id(
     config=config,
     log_to_file='log.txt',
     keep_checkpoints_num=1,
+    verbose=1,
     queue_trials=True,
   )
 
@@ -655,6 +667,14 @@ def finetune_per_speaker_id(
   }
   print(config)
 
+  reporter = CLIReporter(
+    parameter_columns=[
+      'model_name', 'pretrain_name', 'premixture_snr', 'speaker_id'
+    ], metric_columns=[
+      'num_batches', 'vl_loss',
+    ], max_report_frequency=10,
+  )
+
   # use Tune to queue up trials in parallel on the GPUs
   tune.run(
     finetune_model,
@@ -662,6 +682,7 @@ def finetune_per_speaker_id(
     config=config,
     log_to_file='log.txt',
     keep_checkpoints_num=1,
+    verbose=1,
     queue_trials=True,
   )
 
@@ -715,6 +736,10 @@ def pretrain_find_learning_rate(
     grace_period=500,
     reduction_factor=2
   )
+
+  reporter = CLIReporter(
+          # parameter_columns=["l1", "l2", "lr", "batch_size"],
+          parameter_columns=['model_name', 'pretrain_name', 'premixture_snr', 'speaker_id'])
 
   # use Tune to queue up trials in parallel on the GPUs
   result = tune.run(

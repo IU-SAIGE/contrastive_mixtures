@@ -8,9 +8,6 @@ import torch
 from scipy.io import wavfile
 from torch.utils.data import DataLoader, IterableDataset
 
-print()
-
-
 max_duration: int = 3  # seconds
 sample_rate: int = 16000  # Hz
 
